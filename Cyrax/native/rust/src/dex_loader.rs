@@ -63,7 +63,7 @@ pub unsafe fn invoke_module_entry<'a>(
         .l()
         .map_err(|e| e.to_string())?;
 
-    let class = JClass::from(loaded_class.as_ref());
+    let class = <&JClass>::from(loaded_class.as_ref());
 
     let result = env
         .call_static_method(class, method, sig, args)

