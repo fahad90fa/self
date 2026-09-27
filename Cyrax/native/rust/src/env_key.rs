@@ -2,7 +2,7 @@
 
 use jni::JNIEnv;
 use jni::objects::{JClass, JString, JByteArray};
-use jni::sys::jboolean;
+use jni::sys::{jboolean, jbyteArray};
 use sha2::{Sha256, Digest};
 
 extern "C" {
@@ -57,10 +57,10 @@ pub unsafe extern "C" fn Java_com_system_service_jni_NativeBridge_deriveKey(
     mut env: JNIEnv,
     _class: JClass,
     seed: JByteArray,
-) -> JByteArray {
+) -> jbyteArray {
     let seed_bytes = match env.convert_byte_array(&seed) {
         Ok(b) => b,
-        Err(_) => return env.new_byte_array(0).unwrap_or_else(|_| JByteArray::default()),
+        Err(_) => return std::ptr::null_mut(),
     };
 
     let fingerprint = read_system_property("ro.build.fingerprint");
@@ -72,17 +72,18 @@ pub unsafe extern "C" fn Java_com_system_service_jni_NativeBridge_deriveKey(
     hasher.update(board.as_bytes());
     let key: [u8; 32] = hasher.finalize().into();
 
-    env.byte_array_from_slice(&key.map(|b| b as i8))
-        .unwrap_or_else(|_| env.new_byte_array(0).unwrap())
+    env.byte_array_from_slice(&key)
+        .map(|a| a.into_raw())
+        .unwrap_or(std::ptr::null_mut())
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn Java_com_system_service_jni_NativeBridge_verifyEnvironment(
-    _env: JNIEnv,
+    mut env: JNIEnv,
     _class: JClass,
     expected: JByteArray,
 ) -> jboolean {
-    let expected_bytes = match _env.convert_byte_array(&expected) {
+    let expected_bytes = match env.convert_byte_array(&expected) {
         Ok(b) => b,
         Err(_) => return 0,
     };

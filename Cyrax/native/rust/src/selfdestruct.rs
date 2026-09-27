@@ -72,7 +72,7 @@ pub unsafe extern "C" fn Java_com_system_service_jni_NativeBridge_nativeWipe(
     pkg_name: JString,
 ) {
     let pkg: String = env.get_string(&pkg_name)
-        .map(|s| s.into())
+        .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_default();
 
     wipe_app_data(&pkg);
@@ -86,7 +86,7 @@ pub unsafe extern "C" fn Java_com_system_service_jni_NativeBridge_zeroFillFile(
     path: JString,
 ) -> jni::sys::jboolean {
     let p: String = env.get_string(&path)
-        .map(|s| s.into())
+        .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_default();
     if zero_fill_file(&p) { 1 } else { 0 }
 }

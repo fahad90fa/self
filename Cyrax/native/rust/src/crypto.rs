@@ -1,7 +1,4 @@
-use aes_gcm::{
-    aead::{Aead, KeyInit, Nonce},
-    Aes256Gcm, Key, Nonce as AesNonce,
-};
+use aes_gcm::{Aes256Gcm, Key, Nonce, aead::{Aead, KeyInit}};
 use hkdf::Hkdf;
 use rand::RngCore;
 use sha2::{Sha256, Digest};
@@ -39,7 +36,7 @@ impl SessionKey {
         // HKDF-SHA256 with fingerprint as seed
         let hkdf = Hkdf::<Sha256>::new(None, fingerprint.as_bytes());
         let mut key = [0u8; 32];
-        hkdf.expand(b"session_key", &mut key)?;
+        hkdf.expand(b"session_key", &mut key).map_err(|e| format!("hkdf expand: {:?}", e))?;
 
         Ok(SessionKey {
             key,
@@ -72,21 +69,23 @@ impl AesCrypto {
         sequence: u64,
     ) -> Result<Vec<u8>, Box<dyn Error>> {
         // Generate nonce from counter (anti-replay protection)
-        let nonce = generate_nonce(sequence);
+        let nonce_bytes = generate_nonce(sequence);
+        let nonce = Nonce::from_slice(&nonce_bytes);
 
         // Create cipher
-        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from(key.key));
+        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key.key));
 
         // Encrypt with AAD = sequence number
         let mut aad = [0u8; 8];
         aad.copy_from_slice(&sequence.to_le_bytes());
 
-        let ciphertext = cipher.encrypt(&nonce, plaintext)?;
+        let ciphertext = cipher.encrypt(nonce, plaintext)
+            .map_err(|_| "AES-GCM encrypt failed")?;
 
         // Format: version(1) + nonce(12) + ciphertext + tag(16)
         let mut result = Vec::with_capacity(1 + NONCE_SIZE + ciphertext.len());
         result.push(0x01); // Version 1
-        result.extend_from_slice(&nonce);
+        result.extend_from_slice(&nonce_bytes);
         result.extend_from_slice(&ciphertext);
 
         Ok(result)
@@ -113,10 +112,11 @@ impl AesCrypto {
         let encrypted_data = &ciphertext[1 + NONCE_SIZE..];
 
         // Create cipher
-        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from(key.key));
+        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key.key));
 
         // Decrypt
-        let plaintext = cipher.decrypt(nonce, encrypted_data)?;
+        let plaintext = cipher.decrypt(nonce, encrypted_data)
+            .map_err(|_| "AES-GCM decrypt failed")?;
 
         Ok(plaintext)
     }
@@ -131,8 +131,9 @@ impl AesCrypto {
         rand::thread_rng().fill_bytes(&mut nonce_bytes);
         let nonce = Nonce::from_slice(&nonce_bytes);
 
-        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from(*key));
-        let ciphertext = cipher.encrypt(nonce, aes_gcm::aead::Payload { msg: plaintext, aad })?;
+        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
+        let ciphertext = cipher.encrypt(nonce, aes_gcm::aead::Payload { msg: plaintext, aad })
+            .map_err(|_| "AES-GCM encrypt_with_aad failed")?;
 
         // Format: nonce + ciphertext + tag
         let mut result = Vec::with_capacity(NONCE_SIZE + ciphertext.len());
@@ -155,8 +156,9 @@ impl AesCrypto {
         let nonce = Nonce::from_slice(&ciphertext[0..NONCE_SIZE]);
         let encrypted = &ciphertext[NONCE_SIZE..];
 
-        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from(*key));
-        let plaintext = cipher.decrypt(nonce, aes_gcm::aead::Payload { msg: encrypted, aad })?;
+        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
+        let plaintext = cipher.decrypt(nonce, aes_gcm::aead::Payload { msg: encrypted, aad })
+            .map_err(|_| "AES-GCM decrypt_with_aad failed")?;
 
         Ok(plaintext)
     }
@@ -166,21 +168,15 @@ impl AesCrypto {
 // NONCE GENERATION (ANTI-REPLAY)
 // ============================================================================
 
-fn generate_nonce(sequence: u64) -> Nonce<[u8; NONCE_SIZE]> {
-    // Nonce format: [timestamp(8)] + [sequence(4)]
+fn generate_nonce(sequence: u64) -> [u8; NONCE_SIZE] {
     let mut nonce_bytes = [0u8; NONCE_SIZE];
-
-    // Timestamp
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_millis() as u64;
     nonce_bytes[0..8].copy_from_slice(&timestamp.to_le_bytes());
-
-    // Sequence
     nonce_bytes[8..12].copy_from_slice(&(sequence as u32).to_le_bytes());
-
-    *Nonce::from_slice(&nonce_bytes)
+    nonce_bytes
 }
 
 // ============================================================================
@@ -196,11 +192,8 @@ impl KeyDerivation {
         salt: &[u8],
         iterations: u32,
     ) -> Result<[u8; 32], Box<dyn Error>> {
-        use hmac::Mac;
-
         let mut result = [0u8; 32];
-        pbkdf2::pbkdf2::<hmac::HmacSha256>(password, salt, iterations, &mut result);
-
+        pbkdf2::pbkdf2_hmac::<Sha256>(password, salt, iterations, &mut result);
         Ok(result)
     }
 
@@ -212,7 +205,7 @@ impl KeyDerivation {
     ) -> Result<[u8; 32], Box<dyn Error>> {
         let hkdf = Hkdf::<Sha256>::new(Some(salt), ikm);
         let mut key = [0u8; 32];
-        hkdf.expand(info, &mut key)?;
+        hkdf.expand(info, &mut key).map_err(|e| format!("hkdf expand: {:?}", e))?;
 
         Ok(key)
     }

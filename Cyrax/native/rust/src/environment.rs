@@ -76,8 +76,8 @@ impl DeviceEnvironment {
 // ============================================================================
 
 use jni::JNIEnv;
-use jni::objects::{JClass, JString};
-use jni::sys::jboolean;
+use jni::objects::{JClass, JObject, JString};
+use jni::sys::{jboolean, jstring};
 
 /**
  * JNI: Validate device environment
@@ -94,7 +94,7 @@ use jni::sys::jboolean;
  */
 #[no_mangle]
 pub extern "C" fn Java_com_random_package_name_environment_NativeEnvironment_validateEnvironment(
-    env: JNIEnv,
+    mut env: JNIEnv,
     _class: JClass,
     serial: JString,
     android_id: JString,
@@ -171,7 +171,7 @@ pub extern "C" fn Java_com_random_package_name_environment_NativeEnvironment_val
  */
 #[no_mangle]
 pub extern "C" fn Java_com_random_package_name_environment_NativeEnvironment_getDeviceFingerprintHash(
-    env: JNIEnv,
+    mut env: JNIEnv,
     _class: JClass,
     serial: JString,
     android_id: JString,
@@ -179,31 +179,13 @@ pub extern "C" fn Java_com_random_package_name_environment_NativeEnvironment_get
     hardware: JString,
     device: JString,
     manufacturer: JString,
-) -> JString {
-    let serial_str = env.get_string(&serial)
-        .unwrap_or_default()
-        .to_string_lossy()
-        .to_string();
-    let android_id_str = env.get_string(&android_id)
-        .unwrap_or_default()
-        .to_string_lossy()
-        .to_string();
-    let fingerprint_str_val = env.get_string(&fingerprint_str)
-        .unwrap_or_default()
-        .to_string_lossy()
-        .to_string();
-    let hardware_str = env.get_string(&hardware)
-        .unwrap_or_default()
-        .to_string_lossy()
-        .to_string();
-    let device_str = env.get_string(&device)
-        .unwrap_or_default()
-        .to_string_lossy()
-        .to_string();
-    let manufacturer_str = env.get_string(&manufacturer)
-        .unwrap_or_default()
-        .to_string_lossy()
-        .to_string();
+) -> jstring {
+    let serial_str = env.get_string(&serial).map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+    let android_id_str = env.get_string(&android_id).map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+    let fingerprint_str_val = env.get_string(&fingerprint_str).map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+    let hardware_str = env.get_string(&hardware).map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+    let device_str = env.get_string(&device).map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+    let manufacturer_str = env.get_string(&manufacturer).map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
 
     let device_env = DeviceEnvironment::from_jni_values(
         serial_str,
@@ -215,7 +197,34 @@ pub extern "C" fn Java_com_random_package_name_environment_NativeEnvironment_get
     );
 
     let hash = device_env.calculate_hash();
-    env.new_string(&hash).unwrap_or_else(|_| env.new_string("error").unwrap()).into_inner()
+    match env.new_string(&hash) {
+        Ok(s) => JObject::from(s).into_raw(),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+// ============================================================================
+// NATIVE FINGERPRINT HASH (called from lib.rs without JNI)
+// ============================================================================
+
+pub fn get_device_fingerprint_hash() -> Result<String, Box<dyn std::error::Error>> {
+    #[cfg(target_os = "android")]
+    {
+        use crate::env_key::read_system_property;
+        let env = DeviceEnvironment {
+            serial:       read_system_property("ro.serialno"),
+            android_id:   read_system_property("ro.boot.serialno"),
+            fingerprint:  read_system_property("ro.build.fingerprint"),
+            hardware:     read_system_property("ro.hardware"),
+            device:       read_system_property("ro.product.device"),
+            manufacturer: read_system_property("ro.product.manufacturer"),
+        };
+        Ok(env.calculate_hash())
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        Err("get_device_fingerprint_hash: not on Android".into())
+    }
 }
 
 // ============================================================================
@@ -281,7 +290,7 @@ pub mod stub_behavior {
     /// Stub app does nothing suspicious
     pub fn start_stub() {
         // Log as if app is starting normally
-        crate::log_info("App started successfully");
+        super::log_info("App started successfully");
         // Exit gracefully - no error, no crash log
     }
 

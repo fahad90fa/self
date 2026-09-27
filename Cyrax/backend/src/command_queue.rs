@@ -1,11 +1,11 @@
 use anyhow::Result;
 use chrono::Utc;
-use sqlx::SqlitePool;
+use sqlx::PgPool;
 use tracing::debug;
 use uuid::Uuid;
 
 pub struct CommandQueue {
-    db: SqlitePool,
+    db: PgPool,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -26,11 +26,10 @@ pub struct CommandRecord {
 }
 
 impl CommandQueue {
-    pub fn new(db: SqlitePool) -> Self {
+    pub fn new(db: PgPool) -> Self {
         Self { db }
     }
 
-    /// Queue a new command for a device
     pub async fn queue_command(
         &self,
         device_id: &str,
@@ -47,7 +46,7 @@ impl CommandQueue {
                 command_id, device_id, command_type, priority,
                 payload, status, created_at, retry_count, max_retries
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
             "#,
         )
         .bind(&command_id)
@@ -57,25 +56,24 @@ impl CommandQueue {
         .bind(payload)
         .bind("pending")
         .bind(&now)
-        .bind(0)
-        .bind(3)
+        .bind(0_i32)
+        .bind(3_i32)
         .execute(&self.db)
         .await?;
 
-        debug!("Command queued: command_id={}, device_id={}, type={}", 
+        debug!("Command queued: command_id={}, device_id={}, type={}",
                command_id, device_id, command_type);
 
         Ok(command_id)
     }
 
-    /// Get pending commands for a device (ordered by priority)
     pub async fn get_pending_commands(&self, device_id: &str, limit: i32) -> Result<Vec<String>> {
         let records = sqlx::query_as::<_, CommandRecord>(
             r#"
-            SELECT * FROM commands 
-            WHERE device_id = ? AND status = 'pending' AND retry_count < max_retries
+            SELECT * FROM commands
+            WHERE device_id = $1 AND status = 'pending' AND retry_count < max_retries
             ORDER BY priority DESC, created_at ASC
-            LIMIT ?
+            LIMIT $2
             "#
         )
         .bind(device_id)
@@ -83,7 +81,6 @@ impl CommandQueue {
         .fetch_all(&self.db)
         .await?;
 
-        // Convert to JSON strings for transport
         let commands: Vec<String> = records
             .into_iter()
             .map(|r| {
@@ -100,12 +97,11 @@ impl CommandQueue {
         Ok(commands)
     }
 
-    /// Mark command as sent to device
     pub async fn mark_sent(&self, command_id: &str) -> Result<()> {
         let now = Utc::now();
 
         sqlx::query(
-            "UPDATE commands SET status = 'sent', sent_at = ? WHERE command_id = ?"
+            "UPDATE commands SET status = 'sent', sent_at = $1 WHERE command_id = $2"
         )
         .bind(&now)
         .bind(command_id)
@@ -116,12 +112,11 @@ impl CommandQueue {
         Ok(())
     }
 
-    /// Mark command as executed with result
     pub async fn mark_executed(&self, command_id: &str, result: Option<String>) -> Result<()> {
         let now = Utc::now();
 
         sqlx::query(
-            "UPDATE commands SET status = 'executed', executed_at = ?, result = ? WHERE command_id = ?"
+            "UPDATE commands SET status = 'executed', executed_at = $1, result = $2 WHERE command_id = $3"
         )
         .bind(&now)
         .bind(result)
@@ -133,18 +128,17 @@ impl CommandQueue {
         Ok(())
     }
 
-    /// Mark command as failed and retry
     pub async fn mark_failed(&self, command_id: &str, error: &str) -> Result<()> {
         sqlx::query(
             r#"
-            UPDATE commands 
-            SET status = CASE 
+            UPDATE commands
+            SET status = CASE
                 WHEN retry_count < max_retries THEN 'pending'
                 ELSE 'failed'
             END,
             retry_count = retry_count + 1,
-            error_msg = ?
-            WHERE command_id = ?
+            error_msg = $1
+            WHERE command_id = $2
             "#
         )
         .bind(error)
@@ -156,10 +150,9 @@ impl CommandQueue {
         Ok(())
     }
 
-    /// Get all commands for a device
     pub async fn get_device_commands(&self, device_id: &str) -> Result<Vec<CommandRecord>> {
         let records = sqlx::query_as::<_, CommandRecord>(
-            "SELECT * FROM commands WHERE device_id = ? ORDER BY created_at DESC"
+            "SELECT * FROM commands WHERE device_id = $1 ORDER BY created_at DESC"
         )
         .bind(device_id)
         .fetch_all(&self.db)
@@ -168,10 +161,9 @@ impl CommandQueue {
         Ok(records)
     }
 
-    /// Get command by ID
     pub async fn get_command(&self, command_id: &str) -> Result<Option<CommandRecord>> {
         let record = sqlx::query_as::<_, CommandRecord>(
-            "SELECT * FROM commands WHERE command_id = ?"
+            "SELECT * FROM commands WHERE command_id = $1"
         )
         .bind(command_id)
         .fetch_optional(&self.db)
@@ -180,10 +172,9 @@ impl CommandQueue {
         Ok(record)
     }
 
-    /// Count pending commands per device (useful for UI)
     pub async fn get_pending_count(&self, device_id: &str) -> Result<i64> {
         let count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM commands WHERE device_id = ? AND status = 'pending'"
+            "SELECT COUNT(*) FROM commands WHERE device_id = $1 AND status = 'pending'"
         )
         .bind(device_id)
         .fetch_one(&self.db)
@@ -192,24 +183,24 @@ impl CommandQueue {
         Ok(count)
     }
 
-    /// Cancel a command
     pub async fn cancel_command(&self, command_id: &str) -> Result<()> {
-        sqlx::query("UPDATE commands SET status = 'cancelled' WHERE command_id = ? AND status = 'pending'")
-            .bind(command_id)
-            .execute(&self.db)
-            .await?;
+        sqlx::query(
+            "UPDATE commands SET status = 'cancelled' WHERE command_id = $1 AND status = 'pending'"
+        )
+        .bind(command_id)
+        .execute(&self.db)
+        .await?;
 
         debug!("Command cancelled: {}", command_id);
         Ok(())
     }
 
-    /// Cleanup old completed commands (retention policy)
     pub async fn cleanup_old_commands(&self, days_old: i32) -> Result<i64> {
         let result = sqlx::query(
             r#"
-            DELETE FROM commands 
-            WHERE status IN ('executed', 'failed', 'cancelled') 
-            AND datetime(created_at) < datetime('now', '-' || ? || ' days')
+            DELETE FROM commands
+            WHERE status IN ('executed', 'failed', 'cancelled')
+            AND created_at < NOW() - ($1 * INTERVAL '1 day')
             "#
         )
         .bind(days_old)
@@ -227,9 +218,8 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    #[ignore] // Requires database
+    #[ignore]
     async fn test_command_queue() {
-        // This would require a test database setup
-        // Leaving as placeholder for CI/CD integration
+        // Requires a running PostgreSQL instance
     }
 }

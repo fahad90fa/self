@@ -159,7 +159,7 @@ pub struct ShardManager {
 }
 
 impl ShardManager {
-    pub fn new(num_shards: u8, db_pool: sqlx::SqlitePool) -> Arc<Self> {
+    pub fn new(num_shards: u8, db_pool: sqlx::PgPool) -> Arc<Self> {
         let mut shards = Vec::with_capacity(num_shards as usize);
         let shard_txs: Vec<mpsc::Sender<RouterMessage>> = (0..num_shards)
             .map(|id| {
@@ -210,7 +210,7 @@ pub struct Shard {
     pub devices:     Arc<DashMap<String, Arc<DeviceState>>>,
     // Inbound message queue from connection acceptor
     inbound_rx:      Arc<tokio::sync::Mutex<mpsc::Receiver<RouterMessage>>>,
-    db:              sqlx::SqlitePool,
+    db:              sqlx::PgPool,
     // Bounded exfil write queue — drops to WAL, not DB directly
     exfil_tx:        mpsc::Sender<ExfilEntry>,
 }
@@ -219,7 +219,7 @@ impl Shard {
     pub fn new(
         id: u8,
         inbound_rx: mpsc::Receiver<RouterMessage>,
-        db: sqlx::SqlitePool,
+        db: sqlx::PgPool,
     ) -> Arc<Self> {
         let (exfil_tx, exfil_rx) = mpsc::channel(131_072); // 128K pending exfil entries
 
@@ -336,9 +336,11 @@ impl Shard {
         debug!("[shard {}] ACK from {}: cmd={}", self.id, state.device_id, cmd_id);
 
         // Mark command delivered in DB — this IS a DB write but infrequent
-        sqlx::query!("UPDATE commands SET status='delivered', delivered_at=? WHERE id=?",
-            now_unix(), cmd_id
-        ).execute(&self.db).await?;
+        sqlx::query("UPDATE commands SET status='delivered', delivered_at=$1 WHERE id=$2")
+            .bind(now_unix())
+            .bind(cmd_id)
+            .execute(&self.db)
+            .await?;
 
         Ok(())
     }
