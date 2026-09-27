@@ -1,5 +1,4 @@
 use sha2::{Sha256, Digest};
-use std::error::Error;
 
 /**
  * Environmental Keying: Device Fingerprint Validation

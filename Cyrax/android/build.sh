@@ -9,7 +9,7 @@ if ! command -v gradle &> /dev/null; then
     # Fallback: use system gradle or Docker
     if command -v docker &> /dev/null; then
         echo "Using Docker gradle image"
-        docker run --rm -v "$PROJECT_DIR":/workspace gradle:latest gradle "$@"
+        docker run --rm -v "$PROJECT_DIR":/workspace docker.io/library/gradle:latest gradle "$@"
         exit $?
     else
         echo "ERROR: gradle not found and Docker not available"

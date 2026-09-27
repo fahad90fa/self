@@ -5,7 +5,7 @@ services:
   # DATABASE
   # ============================================================================
   postgres:
-    image: docker.io/postgres:16
+    image: docker.io/library/postgres:16
     container_name: c2-postgres
     environment:
       POSTGRES_USER: c2
@@ -70,7 +70,7 @@ services:
       - c2-network
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "mosquitto_sub", "-h", "localhost", "-t", "$SYS/broker/uptime"]
+      test: ["CMD", "mosquitto_sub", "-h", "localhost", "-t", "$$SYS/broker/uptime"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -154,7 +154,7 @@ services:
   # REVERSE PROXY (Nginx)
   # ============================================================================
   reverse-proxy:
-    image: docker.io/nginx:latest
+    image: docker.io/library/nginx:latest
     container_name: c2-proxy
     ports:
       - "80:80"
