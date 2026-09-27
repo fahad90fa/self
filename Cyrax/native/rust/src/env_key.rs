@@ -1,7 +1,7 @@
 // [context: Rust, Android ARM64 JNI, device fingerprint verification]
 
 use jni::JNIEnv;
-use jni::objects::{JClass, JString, JByteArray};
+use jni::objects::{JClass, JByteArray};
 use jni::sys::{jboolean, jbyteArray};
 use sha2::{Sha256, Digest};
 
@@ -11,14 +11,11 @@ extern "C" {
 
 pub fn read_system_property(name: &str) -> String {
     let c_name = std::ffi::CString::new(name).unwrap();
-    let mut buf = [0i8; 256];
+    let mut buf = [0u8; 256];
     unsafe {
-        __system_property_get(c_name.as_ptr(), buf.as_mut_ptr());
-        let bytes: Vec<u8> = buf.iter()
-            .take_while(|&&b| b != 0)
-            .map(|&b| b as u8)
-            .collect();
-        String::from_utf8_lossy(&bytes).into_owned()
+        __system_property_get(c_name.as_ptr(), buf.as_mut_ptr() as *mut libc::c_char);
+        let nul = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+        String::from_utf8_lossy(&buf[..nul]).into_owned()
     }
 }
 
