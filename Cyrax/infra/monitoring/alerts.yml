@@ -1,0 +1,26 @@
+groups:
+  - name: cyrax
+    rules:
+      - alert: BackendDown
+        expr: up{job="cyrax-backend"} == 0
+        for: 1m
+        annotations:
+          summary: "C2 backend is down"
+
+      - alert: HighErrorRate
+        expr: rate(http_requests_total{status=~"5.."}[5m]) > 0.05
+        for: 2m
+        annotations:
+          summary: "High 5xx error rate on C2 API"
+
+      - alert: LowDiskSpace
+        expr: (node_filesystem_avail_bytes / node_filesystem_size_bytes) < 0.1
+        for: 5m
+        annotations:
+          summary: "Less than 10% disk remaining"
+
+      - alert: HighMemory
+        expr: (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) > 0.9
+        for: 3m
+        annotations:
+          summary: "Memory usage above 90%"

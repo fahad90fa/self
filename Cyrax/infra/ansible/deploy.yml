@@ -1,0 +1,33 @@
+---
+- name: Deploy Cyrax backend
+  hosts: c2_nodes
+  become: yes
+  vars:
+    image_tag: "{{ lookup('env', 'IMAGE_TAG') | default('latest') }}"
+
+  tasks:
+    - name: Pull latest image
+      shell: docker pull cyrax/backend:{{ image_tag }}
+
+    - name: Stop old container
+      shell: docker compose -f /opt/cyrax/docker-compose.yml stop backend || true
+
+    - name: Update image tag in compose
+      lineinfile:
+        path: /opt/cyrax/docker-compose.yml
+        regexp: 'image: cyrax/backend:'
+        line: '    image: cyrax/backend:{{ image_tag }}'
+
+    - name: Start new container
+      shell: docker compose -f /opt/cyrax/docker-compose.yml up -d backend
+
+    - name: Run DB migrations
+      shell: docker exec cyrax-backend sqlx migrate run
+      run_once: yes
+
+    - name: Health check
+      uri:
+        url: http://localhost:8080/health
+        status_code: 200
+      retries: 5
+      delay: 5

@@ -1,0 +1,18 @@
+---
+- name: Rotate TLS certificates
+  hosts: c2_nodes
+  become: yes
+  vars:
+    domain: "{{ lookup('env', 'C2_DOMAIN') }}"
+    email: "{{ lookup('env', 'LETSENCRYPT_EMAIL') }}"
+
+  tasks:
+    - name: Request/renew cert
+      shell: >
+        certbot certonly --nginx --non-interactive --agree-tos
+        -m {{ email }} -d {{ domain }}
+      register: certbot_result
+
+    - name: Reload nginx if cert renewed
+      systemd: name=nginx state=reloaded
+      when: "'Congratulations' in certbot_result.stdout or 'renewed' in certbot_result.stdout"
