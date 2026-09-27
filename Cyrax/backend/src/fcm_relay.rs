@@ -1,5 +1,6 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info};
@@ -11,9 +12,9 @@ use warp::Filter;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FcmMessage {
-    pub to: String,                    // Device's FCM token
-    pub data: serde_json::json::Value, // Custom data payload
-    pub priority: String,              // "high", "normal"
+    pub to: String,
+    pub data: Value,
+    pub priority: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -25,10 +26,10 @@ pub struct FcmRegistration {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FcmIncomingMessage {
-    pub from: String,                  // FCM token (sender)
+    pub from: String,
     pub device_id: Option<String>,
-    pub message_type: String,          // "ack", "data", "error"
-    pub payload: serde_json::json::Value,
+    pub message_type: String,
+    pub payload: Value,
 }
 
 // ============================================================================
@@ -36,10 +37,7 @@ pub struct FcmIncomingMessage {
 // ============================================================================
 
 pub struct FcmRelay {
-    // Store FCM tokens for devices (so we can push to them)
     device_fcm_tokens: Arc<RwLock<std::collections::HashMap<String, String>>>,
-    
-    // Firebase project credentials (stored securely, passed at startup)
     firebase_project_id: String,
     firebase_key: String,
 }
@@ -53,7 +51,6 @@ impl FcmRelay {
         }
     }
 
-    /// Register device's FCM token (called when device first connects)
     pub async fn register_fcm_token(&self, device_id: &str, fcm_token: &str) -> Result<()> {
         let mut tokens = self.device_fcm_tokens.write().await;
         tokens.insert(device_id.to_string(), fcm_token.to_string());
@@ -61,8 +58,7 @@ impl FcmRelay {
         Ok(())
     }
 
-    /// Send command to device via FCM (for dormant/offline devices)
-    pub async fn push_command_to_device(&self, device_id: &str, command: serde_json::json::Value) -> Result<()> {
+    pub async fn push_command_to_device(&self, device_id: &str, command: Value) -> Result<()> {
         let tokens = self.device_fcm_tokens.read().await;
         let fcm_token = tokens
             .get(device_id)
@@ -77,13 +73,11 @@ impl FcmRelay {
             priority: "high".to_string(),
         };
 
-        // Call Firebase REST API
         self.send_to_firebase(&fcm_msg).await?;
         debug!("Command pushed via FCM to device: {}", device_id);
         Ok(())
     }
 
-    /// Internal: call Firebase Cloud Messaging REST API
     async fn send_to_firebase(&self, msg: &FcmMessage) -> Result<()> {
         let client = reqwest::Client::new();
         let url = format!(
@@ -121,16 +115,11 @@ impl FcmRelay {
         Ok(())
     }
 
-    /// Handle incoming FCM message from device (via webhook)
     pub async fn handle_fcm_webhook(&self, incoming: FcmIncomingMessage) -> Result<()> {
         info!("FCM message received: from={:?}, type={}", incoming.device_id, incoming.message_type);
-        
-        // In real implementation, route this to C2 server for processing
-        // For now, just acknowledge
         Ok(())
     }
 
-    /// Get device count with registered FCM tokens
     pub async fn registered_device_count(&self) -> usize {
         self.device_fcm_tokens.read().await.len()
     }
@@ -141,7 +130,6 @@ impl FcmRelay {
 // ============================================================================
 
 pub async fn start_fcm_relay_server(relay: Arc<FcmRelay>, addr: std::net::SocketAddr) -> Result<()> {
-    // Register FCM token endpoint
     let register_handler = {
         let relay = relay.clone();
         warp::post()
@@ -163,7 +151,6 @@ pub async fn start_fcm_relay_server(relay: Arc<FcmRelay>, addr: std::net::Socket
             })
     };
 
-    // Webhook for incoming FCM messages
     let webhook_handler = {
         let relay = relay.clone();
         warp::post()
@@ -185,7 +172,6 @@ pub async fn start_fcm_relay_server(relay: Arc<FcmRelay>, addr: std::net::Socket
             })
     };
 
-    // Health check
     let health = warp::path!("health")
         .map(|| warp::reply::json(&serde_json::json!({"status": "ok"})));
 
@@ -194,12 +180,11 @@ pub async fn start_fcm_relay_server(relay: Arc<FcmRelay>, addr: std::net::Socket
         .or(health);
 
     info!("FCM relay server starting on {}", addr);
-    warp::serve(routes)
+    let (_, server_future) = warp::serve(routes)
         .bind_with_graceful_shutdown(addr, async {
-            // Graceful shutdown signal
             tokio::signal::ctrl_c().await.ok();
-        })
-        .await;
+        });
+    server_future.await;
 
     Ok(())
 }
@@ -211,7 +196,7 @@ mod tests {
     #[tokio::test]
     async fn test_fcm_token_registration() {
         let relay = FcmRelay::new("test-project".to_string(), "test-key".to_string());
-        
+
         relay.register_fcm_token("device1", "token123").await.unwrap();
         assert_eq!(relay.registered_device_count().await, 1);
     }

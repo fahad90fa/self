@@ -1,0 +1,46 @@
+---
+- name: Provision C2 nodes
+  hosts: c2_nodes
+  become: yes
+  vars:
+    docker_compose_version: "2.23.0"
+    db_url: "{{ lookup('env', 'DATABASE_URL') }}"
+
+  tasks:
+    - name: Install packages
+      apt:
+        name: [docker.io, docker-compose-plugin, nginx, certbot, python3-certbot-nginx, ufw, fail2ban]
+        state: present
+        update_cache: yes
+
+    - name: Enable Docker
+      systemd: name=docker enabled=yes state=started
+
+    - name: Create app directory
+      file: path=/opt/cyrax state=directory mode=0750
+
+    - name: Configure ufw
+      ufw:
+        rule: allow
+        port: "{{ item }}"
+        proto: tcp
+      loop: [22, 80, 443]
+
+    - name: Enable ufw
+      ufw: state=enabled policy=deny
+
+    - name: Configure fail2ban
+      copy:
+        dest: /etc/fail2ban/jail.local
+        content: |
+          [DEFAULT]
+          bantime  = 3600
+          maxretry = 5
+          [sshd]
+          enabled = true
+
+    - name: Deploy docker-compose
+      copy: src=../docker-compose.yml dest=/opt/cyrax/docker-compose.yml
+
+    - name: Start services
+      shell: cd /opt/cyrax && docker compose up -d

@@ -1,4 +1,5 @@
 use aes_gcm::{Aes256Gcm, Key, Nonce};
+use aes_gcm::aead::{Aead, KeyInit};
 use anyhow::Result;
 use rand::RngCore;
 use std::sync::Arc;
@@ -9,38 +10,31 @@ use tracing::debug;
 // ============================================================================
 
 pub struct EncryptionKeyManager {
-    master_key: Vec<u8>,               // 32 bytes for AES-256
-    key_version: u32,                  // Support key rotation
+    master_key: Vec<u8>,
+    key_version: u32,
 }
 
 impl EncryptionKeyManager {
-    /// Create from a master key (loaded from secure storage, e.g., AWS KMS)
     pub fn new(master_key: Vec<u8>) -> Self {
         assert_eq!(master_key.len(), 32, "Master key must be 32 bytes");
-        Self {
-            master_key,
-            key_version: 1,
-        }
+        Self { master_key, key_version: 1 }
     }
 
-    /// Generate random encryption key
     pub fn generate_key() -> Vec<u8> {
         let mut key = vec![0u8; 32];
         rand::thread_rng().fill_bytes(&mut key);
         key
     }
 
-    /// Encrypt a value
     pub fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>> {
         let mut nonce_bytes = vec![0u8; 12];
         rand::thread_rng().fill_bytes(&mut nonce_bytes);
 
-        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&self.master_key).clone());
+        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&self.master_key));
         let nonce = Nonce::from_slice(&nonce_bytes);
 
         match cipher.encrypt(nonce, plaintext) {
             Ok(ciphertext) => {
-                // Return: key_version (1 byte) + nonce (12 bytes) + ciphertext (with auth tag)
                 let mut result = vec![self.key_version as u8];
                 result.extend_from_slice(&nonce_bytes);
                 result.extend_from_slice(&ciphertext);
@@ -51,23 +45,17 @@ impl EncryptionKeyManager {
         }
     }
 
-    /// Decrypt a value
     pub fn decrypt(&self, ciphertext_with_meta: &[u8]) -> Result<Vec<u8>> {
         if ciphertext_with_meta.len() < 13 {
             return Err(anyhow::anyhow!("Ciphertext too short"));
         }
 
-        // Extract key version
         let _key_version = ciphertext_with_meta[0];
-
-        // Extract nonce (12 bytes)
         let nonce_bytes = &ciphertext_with_meta[1..13];
         let nonce = Nonce::from_slice(nonce_bytes);
-
-        // Extract actual ciphertext
         let ciphertext = &ciphertext_with_meta[13..];
 
-        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&self.master_key).clone());
+        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&self.master_key));
 
         match cipher.decrypt(nonce, ciphertext) {
             Ok(plaintext) => {
@@ -78,7 +66,6 @@ impl EncryptionKeyManager {
         }
     }
 
-    /// Rotate key (generate new master key, re-encrypt all data)
     pub fn rotate_key(&mut self, new_master_key: Vec<u8>) {
         assert_eq!(new_master_key.len(), 32, "Master key must be 32 bytes");
         self.master_key = new_master_key;
@@ -94,7 +81,6 @@ impl EncryptionKeyManager {
 pub struct SensitiveFields;
 
 impl SensitiveFields {
-    /// Fields that should ALWAYS be encrypted in the database
     pub const ENCRYPTED_FIELDS: &'static [&'static str] = &[
         "imei",
         "phone_number",
@@ -109,7 +95,6 @@ impl SensitiveFields {
         "email_body",
     ];
 
-    /// Check if field should be encrypted
     pub fn should_encrypt(field_name: &str) -> bool {
         Self::ENCRYPTED_FIELDS.contains(&field_name)
     }
@@ -120,23 +105,21 @@ impl SensitiveFields {
 // ============================================================================
 
 pub struct EncryptedDatabase {
-    db: sqlx::SqlitePool,
+    db: sqlx::PgPool,
     encryption: Arc<EncryptionKeyManager>,
 }
 
 impl EncryptedDatabase {
-    pub fn new(db: sqlx::SqlitePool, encryption: Arc<EncryptionKeyManager>) -> Self {
+    pub fn new(db: sqlx::PgPool, encryption: Arc<EncryptionKeyManager>) -> Self {
         Self { db, encryption }
     }
 
-    /// Insert device with encrypted sensitive fields
     pub async fn insert_device_encrypted(
         &self,
         device_id: &str,
         imei: Option<&str>,
         phone_number: Option<&str>,
     ) -> Result<()> {
-        // Encrypt sensitive fields
         let encrypted_imei = imei
             .map(|v| self.encryption.encrypt(v.as_bytes()))
             .transpose()?;
@@ -146,7 +129,7 @@ impl EncryptedDatabase {
             .transpose()?;
 
         sqlx::query(
-            "INSERT INTO devices (device_id, imei, phone_number) VALUES (?, ?, ?)"
+            "INSERT INTO devices (device_id, imei, phone_number) VALUES ($1, $2, $3)"
         )
         .bind(device_id)
         .bind(encrypted_imei)
@@ -157,10 +140,9 @@ impl EncryptedDatabase {
         Ok(())
     }
 
-    /// Retrieve device with automatic decryption
     pub async fn get_device_decrypted(&self, device_id: &str) -> Result<Option<DeviceDecrypted>> {
         let record = sqlx::query_as::<_, (String, Option<Vec<u8>>, Option<Vec<u8>>)>(
-            "SELECT device_id, imei, phone_number FROM devices WHERE device_id = ?"
+            "SELECT device_id, imei, phone_number FROM devices WHERE device_id = $1"
         )
         .bind(device_id)
         .fetch_optional(&self.db)
@@ -186,17 +168,12 @@ impl EncryptedDatabase {
                     })
                     .transpose()?;
 
-                Ok(Some(DeviceDecrypted {
-                    device_id: id,
-                    imei,
-                    phone_number,
-                }))
+                Ok(Some(DeviceDecrypted { device_id: id, imei, phone_number }))
             }
             None => Ok(None),
         }
     }
 
-    /// Insert SMS with encrypted body
     pub async fn insert_sms_encrypted(
         &self,
         sms_id: &str,
@@ -206,7 +183,7 @@ impl EncryptedDatabase {
         let encrypted_body = self.encryption.encrypt(body.as_bytes())?;
 
         sqlx::query(
-            "INSERT INTO exfil_sms (sms_id, device_id, body) VALUES (?, ?, ?)"
+            "INSERT INTO exfil_sms (sms_id, device_id, body) VALUES ($1, $2, $3)"
         )
         .bind(sms_id)
         .bind(device_id)
@@ -217,10 +194,9 @@ impl EncryptedDatabase {
         Ok(())
     }
 
-    /// Get SMS with automatic decryption
     pub async fn get_sms_decrypted(&self, device_id: &str, limit: i32) -> Result<Vec<SmsDecrypted>> {
         let records = sqlx::query_as::<_, (String, Option<Vec<u8>>, Option<String>)>(
-            "SELECT sms_id, body, received_at FROM exfil_sms WHERE device_id = ? LIMIT ?"
+            "SELECT sms_id, body, received_at FROM exfil_sms WHERE device_id = $1 LIMIT $2"
         )
         .bind(device_id)
         .bind(limit)
@@ -238,17 +214,12 @@ impl EncryptedDatabase {
                 })
                 .transpose()?;
 
-            results.push(SmsDecrypted {
-                sms_id,
-                body,
-                received_at,
-            });
+            results.push(SmsDecrypted { sms_id, body, received_at });
         }
 
         Ok(results)
     }
 
-    /// Insert file with encrypted data
     pub async fn insert_file_encrypted(
         &self,
         file_id: &str,
@@ -259,7 +230,7 @@ impl EncryptedDatabase {
         let encrypted_data = self.encryption.encrypt(file_data)?;
 
         sqlx::query(
-            "INSERT INTO exfil_files (file_id, device_id, file_name, file_data) VALUES (?, ?, ?, ?)"
+            "INSERT INTO exfil_files (file_id, device_id, file_name, file_data) VALUES ($1, $2, $3, $4)"
         )
         .bind(file_id)
         .bind(device_id)
@@ -271,10 +242,9 @@ impl EncryptedDatabase {
         Ok(())
     }
 
-    /// Get file with automatic decryption
     pub async fn get_file_decrypted(&self, file_id: &str) -> Result<Option<Vec<u8>>> {
         let record = sqlx::query_as::<_, (Vec<u8>,)>(
-            "SELECT file_data FROM exfil_files WHERE file_id = ?"
+            "SELECT file_data FROM exfil_files WHERE file_id = $1"
         )
         .bind(file_id)
         .fetch_optional(&self.db)

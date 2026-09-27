@@ -1,7 +1,12 @@
 # Rust
-/target/
+target/
 Cargo.lock
 *.rs.bk
+
+# Node / panel
+node_modules/
+package-lock.json
+dist/
 
 # Android
 /.gradle/

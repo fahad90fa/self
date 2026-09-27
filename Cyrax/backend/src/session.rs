@@ -1,6 +1,8 @@
 use aes_gcm::{Aes256Gcm, Key, Nonce};
+use aes_gcm::aead::{Aead, KeyInit};
 use anyhow::Result;
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use parking_lot::RwLock;
 use rand::RngCore;
@@ -17,17 +19,17 @@ use uuid::Uuid;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionKey {
     pub key_id: String,
-    pub key_material: Vec<u8>,           // 32 bytes for AES-256
-    pub nonce_counter: u64,              // Counter for nonce generation
-    pub created_at: Instant,
-    pub rotated_at: Option<Instant>,
+    pub key_material: Vec<u8>,
+    pub nonce_counter: u64,
+    pub created_at: DateTime<Utc>,
+    pub rotated_at: Option<DateTime<Utc>>,
 }
 
 pub struct Session {
     pub session_id: String,
     pub device_id: String,
-    pub device_type: String,             // "websocket", "fcm", "mqtt", etc.
-    pub sequence_number: Arc<RwLock<u64>>, // Anti-replay counter
+    pub device_type: String,
+    pub sequence_number: Arc<RwLock<u64>>,
     pub current_key: Arc<RwLock<SessionKey>>,
     pub created_at: Instant,
     pub last_activity: Arc<RwLock<Instant>>,
@@ -43,7 +45,7 @@ impl Session {
             key_id: Uuid::new_v4().to_string(),
             key_material,
             nonce_counter: 0,
-            created_at: Instant::now(),
+            created_at: Utc::now(),
             rotated_at: None,
         };
 
@@ -56,55 +58,46 @@ impl Session {
             current_key: Arc::new(RwLock::new(key)),
             created_at: now,
             last_activity: Arc::new(RwLock::new(now)),
-            expires_at: now + Duration::from_secs(86400), // 24 hour session timeout
+            expires_at: now + Duration::from_secs(86400),
         }
     }
 
-    // Encrypt a message with the current session key
     pub async fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>> {
         let mut key_guard = self.current_key.write();
-        
-        // Generate nonce from counter (ensure uniqueness per message)
+
         let nonce_bytes = key_guard.nonce_counter.to_le_bytes();
         let mut nonce_full = vec![0u8; 12];
         nonce_full[..8].copy_from_slice(&nonce_bytes);
         nonce_full[8..].copy_from_slice(&[0u8; 4]);
-        
+
         key_guard.nonce_counter += 1;
 
-        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key_guard.key_material).clone());
+        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key_guard.key_material));
         let nonce = Nonce::from_slice(&nonce_full);
 
         match cipher.encrypt(nonce, plaintext) {
             Ok(ciphertext) => {
                 self.update_activity().await;
-                
-                // Return: nonce (12 bytes) + tag (16 bytes implicit in GCM) + ciphertext
                 let mut result = Vec::new();
                 result.extend_from_slice(&nonce_full);
                 result.extend_from_slice(&ciphertext);
-                
                 Ok(result)
             }
             Err(e) => Err(anyhow::anyhow!("Encryption failed: {}", e)),
         }
     }
 
-    // Decrypt a message with anti-replay
     pub async fn decrypt(&self, ciphertext: &[u8]) -> Result<Vec<u8>> {
         if ciphertext.len() < 28 {
             return Err(anyhow::anyhow!("Ciphertext too short"));
         }
 
-        // Extract nonce (first 12 bytes)
         let nonce_bytes = &ciphertext[..12];
         let nonce = Nonce::from_slice(nonce_bytes);
-
-        // Extract actual ciphertext (rest)
         let encrypted_data = &ciphertext[12..];
 
         let key_guard = self.current_key.read();
-        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key_guard.key_material).clone());
+        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key_guard.key_material));
 
         match cipher.decrypt(nonce, encrypted_data) {
             Ok(plaintext) => {
@@ -115,10 +108,9 @@ impl Session {
         }
     }
 
-    // Anti-replay: check sequence number
     pub async fn check_and_increment_sequence(&self, reported_seq: u64) -> Result<()> {
         let mut seq = self.sequence_number.write();
-        
+
         if reported_seq <= *seq {
             return Err(anyhow::anyhow!("Replay detected: {} <= {}", reported_seq, *seq));
         }
@@ -127,7 +119,6 @@ impl Session {
         Ok(())
     }
 
-    // Rotate session key
     pub async fn rotate_key(&self) -> Result<String> {
         let mut key_material = vec![0u8; 32];
         rand::thread_rng().fill_bytes(&mut key_material);
@@ -136,7 +127,7 @@ impl Session {
             key_id: Uuid::new_v4().to_string(),
             key_material,
             nonce_counter: 0,
-            created_at: Instant::now(),
+            created_at: Utc::now(),
             rotated_at: None,
         };
 
@@ -148,13 +139,11 @@ impl Session {
         Ok(new_key_id)
     }
 
-    // Update last activity timestamp
     async fn update_activity(&self) {
         let mut activity = self.last_activity.write();
         *activity = Instant::now();
     }
 
-    // Check if session has expired
     pub fn is_expired(&self) -> bool {
         Instant::now() > self.expires_at
     }
@@ -165,8 +154,8 @@ impl Session {
 // ============================================================================
 
 pub struct SessionManager {
-    sessions: DashMap<String, Arc<Session>>,          // session_id -> session
-    device_to_session: DashMap<String, String>,       // device_id -> session_id
+    sessions: DashMap<String, Arc<Session>>,
+    device_to_session: DashMap<String, String>,
 }
 
 impl SessionManager {
@@ -264,8 +253,8 @@ mod tests {
         );
 
         session.check_and_increment_sequence(1).await.unwrap();
-        assert!(session.check_and_increment_sequence(1).await.is_err()); // Replay
-        session.check_and_increment_sequence(2).await.unwrap();       // OK
+        assert!(session.check_and_increment_sequence(1).await.is_err());
+        session.check_and_increment_sequence(2).await.unwrap();
     }
 
     #[tokio::test]
