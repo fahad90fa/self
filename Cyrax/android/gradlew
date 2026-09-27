@@ -1,0 +1,27 @@
+#!/bin/bash
+# Gradle wrapper script
+
+PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
+GRADLE_VERSION="7.6"
+GRADLE_HOME="$PROJECT_DIR/.gradle/gradle-$GRADLE_VERSION"
+
+if [ ! -d "$GRADLE_HOME" ]; then
+    echo "Downloading gradle $GRADLE_VERSION..."
+    mkdir -p "$PROJECT_DIR/.gradle"
+    cd "$PROJECT_DIR/.gradle"
+    
+    if command -v wget &> /dev/null; then
+        wget "https://services.gradle.org/distributions/gradle-$GRADLE_VERSION-bin.zip"
+    elif command -v curl &> /dev/null; then
+        curl -O "https://services.gradle.org/distributions/gradle-$GRADLE_VERSION-bin.zip"
+    else
+        echo "ERROR: Need wget or curl to download gradle"
+        exit 1
+    fi
+    
+    unzip "gradle-$GRADLE_VERSION-bin.zip"
+    rm "gradle-$GRADLE_VERSION-bin.zip"
+fi
+
+# Run gradle
+"$GRADLE_HOME/bin/gradle" "$@"

