@@ -84,7 +84,7 @@ pub fn sign_message(msg: &mut C2Message, key: &[u8; 32]) {
     let mut tmp = msg.clone();
     tmp.hmac = [0u8; 32];
     let raw = serialize(&tmp);
-    let mut mac = HmacSha256::new_from_slice(key).unwrap();
+    let mut mac = <HmacSha256 as hmac::Mac>::new_from_slice(key).unwrap();
     mac.update(&raw[..raw.len() - 32]);
     let result = mac.finalize().into_bytes();
     msg.hmac.copy_from_slice(&result);
@@ -94,7 +94,7 @@ pub fn verify_message(msg: &C2Message, key: &[u8; 32]) -> bool {
     let mut tmp = msg.clone();
     tmp.hmac = [0u8; 32];
     let raw = serialize(&tmp);
-    let mut mac = HmacSha256::new_from_slice(key).unwrap();
+    let mut mac = <HmacSha256 as hmac::Mac>::new_from_slice(key).unwrap();
     mac.update(&raw[..raw.len() - 32]);
     mac.verify_slice(&msg.hmac).is_ok()
 }

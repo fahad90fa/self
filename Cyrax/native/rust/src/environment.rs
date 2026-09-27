@@ -341,25 +341,25 @@ pub fn bind_encryption_key_to_device(
 // LOGGING (ANDROID COMPATIBLE)
 // ============================================================================
 
+#[cfg(target_os = "android")]
+extern "C" {
+    fn __android_log_write(
+        prio: libc::c_int,
+        tag: *const libc::c_char,
+        text: *const libc::c_char,
+    ) -> libc::c_int;
+}
+
 pub fn log_info(message: &str) {
     #[cfg(target_os = "android")]
     {
         use std::ffi::CString;
         let tag = CString::new("C2_Env").unwrap();
         let msg = CString::new(message).unwrap();
-        unsafe {
-            libc::__android_log_write(
-                3, // INFO
-                tag.as_ptr(),
-                msg.as_ptr(),
-            );
-        }
+        unsafe { __android_log_write(3, tag.as_ptr(), msg.as_ptr()); }
     }
-
     #[cfg(not(target_os = "android"))]
-    {
-        println!("[Env] {}", message);
-    }
+    { println!("[Env] {}", message); }
 }
 
 pub fn log_error(message: &str) {
@@ -368,19 +368,10 @@ pub fn log_error(message: &str) {
         use std::ffi::CString;
         let tag = CString::new("C2_Env").unwrap();
         let msg = CString::new(message).unwrap();
-        unsafe {
-            libc::__android_log_write(
-                6, // ERROR
-                tag.as_ptr(),
-                msg.as_ptr(),
-            );
-        }
+        unsafe { __android_log_write(6, tag.as_ptr(), msg.as_ptr()); }
     }
-
     #[cfg(not(target_os = "android"))]
-    {
-        eprintln!("[Env] ERROR: {}", message);
-    }
+    { eprintln!("[Env] ERROR: {}", message); }
 }
 
 // ============================================================================
