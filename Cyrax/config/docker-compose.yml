@@ -53,22 +53,22 @@ services:
   # MQTT BROKER
   # ============================================================================
   mqtt-broker:
-    image: docker.io/eclipse/mosquitto:2
+    image: docker.io/emqx/emqx:5
     container_name: c2-mqtt
     ports:
-      - "1883:1883"  # MQTT unencrypted (internal only)
+      - "1883:1883"  # MQTT
       - "8883:8883"  # MQTT over TLS
+      - "8083:8083"  # MQTT over WebSocket
+    environment:
+      EMQX_NAME: c2-mqtt
+      EMQX_ALLOW_ANONYMOUS: "true"
     volumes:
-      - ./mosquitto.conf:/mosquitto/config/mosquitto.conf
-      - ./mosquitto-acl.txt:/mosquitto/config/acl.txt
-      - ./mosquitto-passwords.txt:/mosquitto/config/passwords.txt
-      - mosquitto-data:/mosquitto/data
-      - mosquitto-logs:/mosquitto/log
+      - mqtt-data:/opt/emqx/data
     networks:
       - c2-network
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "mosquitto_sub", "-h", "localhost", "-t", "$$SYS/broker/uptime"]
+      test: ["CMD", "/opt/emqx/bin/emqx", "ping"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -250,8 +250,7 @@ services:
 
 volumes:
   postgres-data:
-  mosquitto-data:
-  mosquitto-logs:
+  mqtt-data:
   prometheus-data:
   grafana-data:
   elasticsearch-data:
