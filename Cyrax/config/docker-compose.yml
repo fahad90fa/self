@@ -50,28 +50,13 @@ services:
       retries: 3
 
   # ============================================================================
-  # MQTT BROKER
+  # MQTT BROKER — run natively: sudo apt install mosquitto && sudo systemctl enable --now mosquitto
+  # Docker Hub manifest for eclipse/mosquitto and emqx/emqx fails on Podman
+  # without --registries policy configured. Native install is more reliable for dev.
   # ============================================================================
-  mqtt-broker:
-    image: docker.io/emqx/emqx:5
-    container_name: c2-mqtt
-    ports:
-      - "1883:1883"  # MQTT
-      - "8883:8883"  # MQTT over TLS
-      - "8083:8083"  # MQTT over WebSocket
-    environment:
-      EMQX_NAME: c2-mqtt
-      EMQX_ALLOW_ANONYMOUS: "true"
-    volumes:
-      - mqtt-data:/opt/emqx/data
-    networks:
-      - c2-network
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "/opt/emqx/bin/emqx", "ping"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
+  # mqtt-broker:
+  #   image: docker.io/eclipse/mosquitto:latest
+  #   ... re-enable once Podman registries.conf is updated or when targeting production
 
   # ============================================================================
   # FCM RELAY SERVICE
@@ -250,7 +235,6 @@ services:
 
 volumes:
   postgres-data:
-  mqtt-data:
   prometheus-data:
   grafana-data:
   elasticsearch-data:
